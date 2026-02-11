@@ -47,11 +47,50 @@ export function stripHeader(source) {
   return kept.join("\n");
 }
 
+/**
+ * Demangle Nim-generated identifier names.
+ *
+ * Patterns:
+ *   Function names:  sanitizeEnvVar__test95tier2_u61  →  sanitizeEnvVar
+ *   Variable names:  result_553648191                 →  result
+ *   Parameter names: request_p0                       →  request
+ */
+export function demangleNames(source) {
+  // Collect all identifiers and build rename map (longest first to avoid partial matches)
+  const renameMap = new Map();
+
+  // Pattern 1: Function names — name__module_uNN (double underscore + module info)
+  for (const m of source.matchAll(/\b([a-zA-Z_]\w*?)__\w+_u\d+\b/g)) {
+    renameMap.set(m[0], m[1]);
+  }
+
+  // Pattern 2: Variable names — name_NNNNNN (6+ digit Nim symbol ID)
+  for (const m of source.matchAll(/\b([a-zA-Z_]\w*?)_(\d{6,})\b/g)) {
+    renameMap.set(m[0], m[1]);
+  }
+
+  // Pattern 3: Parameter names — name_pN (parameter index suffix)
+  for (const m of source.matchAll(/\b([a-zA-Z_]\w*?)_p(\d)\b/g)) {
+    renameMap.set(m[0], m[1]);
+  }
+
+  // Sort by length descending to avoid partial replacement
+  const sorted = [...renameMap.entries()].sort((a, b) => b[0].length - a[0].length);
+
+  let result = source;
+  for (const [mangled, base] of sorted) {
+    result = result.replaceAll(mangled, base);
+  }
+
+  return result;
+}
+
 // CLI: node postprocess.mjs <input> [output]
 const args = process.argv.slice(2);
 if (args.length >= 1) {
-  const input = readFileSync(args[0], "utf-8");
-  const output = stripHeader(input);
+  let output = readFileSync(args[0], "utf-8");
+  output = stripHeader(output);
+  output = demangleNames(output);
   if (args[1]) {
     writeFileSync(args[1], output);
   } else {
