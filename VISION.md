@@ -35,7 +35,7 @@ The Nim JS backend (`compiler/jsgen.nim`) is 3,232 lines. It's not a monster. Th
 
 3. **Dead infrastructure elimination.** `nimCopy` (deep-copy for value semantics) and NTI tables (runtime type info) are emitted for every program, even when no code path uses them. If your program uses `ref` types (which it should, for JS), this infrastructure is dead weight.
 
-4. **Stdlib-to-builtin mapping.** Nim's stdlib reimplements operations that JavaScript provides natively: `strutils.toUpperAscii` → `String.prototype.toUpperCase`, `json.%*{}` → object literals or `JSON.stringify`, `tables.Table` → `Map` or plain objects. jsinn maps these at the codegen level so the Nim stdlib compiles to idiomatic JS builtins.
+4. **Stdlib-to-builtin mapping.** Nim's stdlib reimplements operations that JavaScript provides natively: `strutils.toUpperAscii` → `String.prototype.toUpperCase`, `json.%*{}` → object literals or `JSON.stringify`, `tables.Table` → `Map` or plain objects. jsinn rewrites these at the macro layer (before jsgen runs) so the Nim stdlib compiles to idiomatic JS builtins.
 
 5. **Cosmetic cleanup.** Remove `BeforeRet` label patterns, use `const`/`let` instead of `var`, clean up parameter name mangling (`request_p0` → `request`), remove dead variable declarations.
 
@@ -70,37 +70,45 @@ A developer who has never seen Nim should be able to read jsinn's output, unders
 
 ## 4. Approach
 
-jsinn operates as a **post-processing layer** on top of `nim js` output, plus targeted patches to `compiler/jsgen.nim` where post-processing alone isn't sufficient (primarily: native string representation).
+jsinn is **two user-space layers** — a compile-time macro library and a post-codegen processing tool. Neither modifies the Nim compiler. Both ship as standard nimble packages.
 
-### 4.1 What changes in the compiler
+### 4.1 Macro library (compile-time, before jsgen)
 
-The native string representation is the one change that cannot be done as post-processing. When `jsgen.nim` decides to represent `"hello"` as `[104,101,108,108,111]`, that decision propagates through every string operation. Fixing this requires modifying the string codegen path in jsgen to emit JS string literals and JS string methods instead of byte array operations.
+Nim's macro system runs *before* the JS backend. At the macro layer, code is still a typed Nim AST — strings are `string` type, not char arrays. Char arrays only appear when `jsgen.nim` translates `string` to its JS representation.
 
-This is bounded work. The relevant code paths in jsgen are:
-- String literal emission
-- String concatenation
-- String comparison
-- String indexing (which changes semantics — byte index vs character index)
+jsinn intercepts stdlib calls at the macro layer and rewrites them to JS-native FFI equivalents:
 
-The string indexing semantic difference is the one genuinely hard part. Nim strings are byte sequences; JS strings are UTF-16. Code that indexes into strings by byte offset will behave differently. jsinn handles this by:
-- Defaulting to JS native strings (correct for the vast majority of code)
-- Providing a `{.byteString.}` pragma for code that genuinely needs byte-level access
-- Emitting a compile-time warning when byte-indexed string access is detected
+```nim
+# What the developer writes:
+name.toUpperAscii().replace("-", "_")
 
-### 4.2 What changes as post-processing
+# What jsinn's macro rewrites it to (before jsgen sees it):
+($name.cstring.toUpperCase()).replace("-".cstring, "_".cstring)
+```
 
-Everything else can be done as a post-codegen pass over the emitted JS:
+Where `toUpperCase` and `replace` are thin `{.importjs.}` wrappers around JS builtins. jsgen sees `cstring` + FFI calls and emits clean JS. The char array machinery never triggers.
+
+This is the key insight: **we don't need to fix jsgen because we can prevent the problem before jsgen runs.** The macro layer is exactly the right intervention point — it's user-space, it's extensible, and it leverages Nim's own metaprogramming facilities.
+
+The macro library covers:
+- **String operations**: `strutils` functions → JS `String.prototype` methods
+- **JSON construction**: `json.%*{}` → JS object literals / `JSON.stringify`
+- **Collection operations**: `sequtils` functions → JS `Array.prototype` methods
+- **String representation**: Ensure strings flow through as `cstring` (JS native) rather than Nim `string` (byte array) wherever possible
+
+### 4.2 Post-processing tool (after jsgen)
+
+Even with macro rewrites, `nim js` output still contains dead weight that the macros can't prevent — jsgen unconditionally emits runtime infrastructure. The post-processing tool cleans this up:
 
 - **Tree shaking**: Build a call graph from the emitted JS, remove unreachable functions
 - **Dead infrastructure elimination**: Detect unused `nimCopy`, NTI tables, `setConstr`, and remove them
-- **Stdlib-to-builtin rewriting**: Pattern-match known Nim stdlib codegen patterns and replace with JS builtins (e.g., the `nsuToUpperAsciiStr` function → `.toUpperCase()` call)
-- **Cosmetic cleanup**: `var` → `const`/`let`, parameter demangling, BeforeRet elimination, dead variable removal
+- **Cosmetic cleanup**: `var` → `const`/`let`, parameter demangling (`request_p0` → `request`), BeforeRet elimination, dead variable removal
 
 ### 4.3 What doesn't change
 
-- The Nim compiler itself (beyond the string representation patch in 4.1)
-- Nim's macro system, type system, or semantics
-- How developers write Nim code — jsinn is transparent
+- The Nim compiler — zero patches to jsgen or any other compiler file
+- Nim's type system or semantics
+- How developers write Nim code — jsinn is transparent (you `import jsinn` and your output gets clean)
 - Correctness — jsinn output must be semantically identical to `nim js` output for all inputs
 
 ---
@@ -139,7 +147,7 @@ A benchmark passes if all three metrics are met. jsinn ships when **18 of 20 ben
 - **Minification.** jsinn produces readable code, not minimal code. Use Terser/Closure Compiler on top if you want minification.
 - **Source maps.** jsinn output should be readable enough that source maps are a nice-to-have, not a necessity. Source map support may come later but is not a priority.
 - **Non-JS targets.** jsinn is about JavaScript. If you want WASM, use Nim's C backend + Emscripten.
-- **Forking the compiler.** jsinn aims to be upstreamable. The jsgen patches should be small, clean, and acceptable to the Nim core team. The post-processing layer is a standalone tool.
+- **Modifying the compiler.** jsinn operates entirely in user-space: a macro library (before jsgen) and a post-processing tool (after jsgen). Zero compiler patches. This makes jsinn compatible with any Nim version and eliminates the upstream-acceptance bottleneck.
 
 ---
 
@@ -147,35 +155,27 @@ A benchmark passes if all three metrics are met. jsinn ships when **18 of 20 ben
 
 ### Phase 1: Foundation
 
-Prove the approach works on the spike benchmarks.
+Prove both layers work on the spike benchmarks.
 
-1. Native JS string representation in jsgen (the compiler patch)
-2. Post-processing pass: tree shaking + dead infrastructure elimination
-3. Validate: Tier 2 spike drops from 684 lines to < 40 lines
-4. Validate: Tier 3 spike drops from 1545 lines to < 60 lines
+1. Macro library: rewrite `strutils` calls (toUpperAscii, replace) to JS-native FFI equivalents
+2. Macro library: rewrite `json` construction (`%*{}`) to JS-native FFI equivalents
+3. Post-processing tool: tree shaking + dead infrastructure elimination (nimCopy, NTI tables, unused functions)
+4. Post-processing tool: cosmetic cleanup (BeforeRet elimination, var → const/let, parameter demangling)
+5. Validate: Tier 2 spike drops from 684 lines to < 40 lines
+6. Validate: Tier 3 spike drops from 1545 lines to < 60 lines
 
-### Phase 2: Stdlib Mapping
+### Phase 2: Stdlib Coverage
 
-Map the most-used stdlib modules to JS builtins.
+Expand the macro library to cover the most-used stdlib modules.
 
-1. `strutils` → JS string methods
-2. `json` → JSON.parse / JSON.stringify / object literals
-3. `tables` → Map or plain objects
-4. `sequtils` → Array methods (map, filter, reduce)
-5. `asyncjs` → native async/await (already close, needs cleanup)
-6. `math` → Math.* (already mapped on JS, needs cleanup)
+1. `strutils` (full coverage) → JS `String.prototype` methods
+2. `json` (full coverage) → `JSON.parse` / `JSON.stringify` / object literals
+3. `tables` → `Map` or plain objects
+4. `sequtils` → `Array.prototype` methods (map, filter, reduce)
+5. `asyncjs` → native async/await (already close, needs cleanup via post-processing)
+6. `math` → `Math.*` (already mapped on JS backend, needs cleanup via post-processing)
 
-### Phase 3: Cosmetics
-
-Make the output look like a human wrote it.
-
-1. `var` → `const`/`let` (analyze reassignment)
-2. Parameter demangling (`request_p0` → `request`)
-3. BeforeRet label elimination → early returns
-4. Dead variable elimination
-5. Whitespace and formatting normalization
-
-### Phase 4: Benchmark Suite
+### Phase 3: Benchmark Suite
 
 Build and validate against 20 real-world repos.
 
@@ -185,14 +185,13 @@ Build and validate against 20 real-world repos.
 4. Iterate on failures until 18/20 pass
 5. Write up results
 
-### Phase 5: Community
+### Phase 4: Community
 
 Ship it.
 
-1. Upstream the jsgen string patch to nim-lang/Nim (PR or RFC)
-2. Publish the post-processing tool as a nimble package
-3. Write a blog post with benchmark results
-4. Present to the Nim community
+1. Publish both layers as nimble packages
+2. Write a blog post with benchmark results
+3. Present to the Nim community
 
 ---
 
