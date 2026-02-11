@@ -1,4 +1,4 @@
-# jsinn — Vision 0.1.0
+# jsinn — Vision 0.2.0
 
 *Make `nim js` not suck. Clean, readable JavaScript output from idiomatic Nim.*
 
@@ -113,7 +113,7 @@ Even with macro rewrites, `nim js` output still contains dead weight that the ma
 
 ---
 
-## 5. The 20-Repo Benchmark
+## 5. The Benchmark Suite
 
 The benchmark suite validates jsinn against real-world code patterns. Each benchmark consists of:
 
@@ -122,12 +122,40 @@ The benchmark suite validates jsinn against real-world code patterns. Each bench
 3. **jsinn output** from compiling the Nim port
 4. **A readability score**: can a JS developer understand the output without knowing Nim?
 
+### Coverage matrix
+
+The benchmark repos must collectively exercise **all 13 pattern categories**. Each category must appear in at least 2 repos, and each repo will exercise multiple categories. The goal is uncomfortable coverage — we want to discover what breaks, not confirm what works.
+
+**Core language patterns (must be covered by multiple repos):**
+
+| # | Category | Nim stdlib | JS target | Example patterns |
+|---|----------|-----------|-----------|-----------------|
+| 1 | String manipulation | `strutils` | `String.prototype` | split, join, replace, trim, case conversion, interpolation, slice, pad |
+| 2 | JSON handling | `json` | `JSON.*`, object literals | parse, stringify, nested objects, arrays, dynamic key construction |
+| 3 | Array/seq operations | `sequtils` | `Array.prototype` | map, filter, reduce, find, sort, concat, spread, destructuring |
+| 4 | Async/await | `asyncjs` | native async/await | fetch chains, Promise.all, error handling in async, sequential vs parallel |
+| 5 | Error handling | exceptions | try/catch/throw | custom error types, error propagation, finally blocks, nested try/catch |
+| 6 | Closures & callbacks | procs/lambdas | functions/arrows | higher-order functions, event handlers, partial application, currying |
+| 7 | Objects & classes | object types | classes/prototypes | methods, inheritance, getters/setters, static members, factory patterns |
+
+**API surface patterns (must be covered):**
+
+| # | Category | Nim stdlib | JS target | Example patterns |
+|---|----------|-----------|-----------|-----------------|
+| 8 | HTTP fetch | `httpclient`/FFI | `fetch` API | request/response, headers, body parsing, status codes, streaming |
+| 9 | URL parsing | `uri` | `URL` API | parse, construct, query params, path manipulation, relative resolution |
+| 10 | Key-value maps | `tables` | `Map`/plain objects | get/set/delete, iteration, merging, default values, nested maps |
+| 11 | Math operations | `math` | `Math.*` | floor/ceil/round, min/max, random, trig, pow, clamp |
+| 12 | Date/time | `times` | `Date`/`Intl` | parsing, formatting, arithmetic, comparison, timezones, ISO 8601 |
+| 13 | Regular expressions | `re`/`nre` | `RegExp` | match, replace, capture groups, global/multiline flags, split by regex |
+
 ### Selection criteria for benchmark repos
 
-- Variety: CLI tools, API servers, browser apps, utility libraries, Workers
-- Messiness: real-world code with edge cases, not textbook examples
-- Feature coverage: strings, JSON, async/await, classes, error handling, closures, modules
-- Size range: from 50-line utilities to 500+ line applications
+- **Variety**: Cloudflare Workers, API servers, CLI tools, browser utilities, string/data libraries, middleware
+- **Messiness**: Real-world code with edge cases, not textbook examples. The messier the better.
+- **Size range**: From 50-line single-function utilities to 500+ line applications
+- **Overlap**: Each repo should exercise 3-5 categories. Prefer too much overlap over gaps.
+- **Source**: Real GitHub repos with real users, not contrived examples
 
 ### Benchmark grading
 
@@ -164,28 +192,21 @@ Prove both layers work on the spike benchmarks.
 5. Validate: Tier 2 spike drops from 684 lines to < 40 lines
 6. Validate: Tier 3 spike drops from 1545 lines to < 60 lines
 
-### Phase 2: Stdlib Coverage
+### Phase 2: Benchmark-Driven Stdlib Expansion
 
-Expand the macro library to cover the most-used stdlib modules.
+Port real repos, hit walls, add shims. The benchmark suite and stdlib coverage grow together.
 
-1. `strutils` (full coverage) → JS `String.prototype` methods
-2. `json` (full coverage) → `JSON.parse` / `JSON.stringify` / object literals
-3. `tables` → `Map` or plain objects
-4. `sequtils` → `Array.prototype` methods (map, filter, reduce)
-5. `asyncjs` → native async/await (already close, needs cleanup via post-processing)
-6. `math` → `Math.*` (already mapped on JS backend, needs cleanup via post-processing)
+1. Pick a real TypeScript/JavaScript repo from GitHub
+2. Port it (or a representative subset) to idiomatic Nim
+3. Compile through jsinn (`jsClean` macro + `postprocess.mjs`)
+4. Compare output to original — identify what's broken or ugly
+5. Add the missing macro shims / post-processing rules to fix it
+6. Record the benchmark result
+7. Repeat until 20 repos pass (18/20 required for Phase 3)
 
-### Phase 3: Benchmark Suite
+Stdlib modules get expanded on-demand as repos reveal gaps. No speculative shim work.
 
-Build and validate against 20 real-world repos.
-
-1. Select 20 repos (diverse, messy, real)
-2. Port representative subsets to idiomatic Nim
-3. Compile through jsinn, compare output
-4. Iterate on failures until 18/20 pass
-5. Write up results
-
-### Phase 4: Community
+### Phase 3: Community
 
 Ship it.
 
