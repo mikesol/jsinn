@@ -11,6 +11,7 @@
 ## hundreds of lines of runtime.
 
 import std/macros
+import std/strutils
 
 # ============================================================
 # Shim table: Nim stdlib → JS native
@@ -103,6 +104,23 @@ proc rewriteAst(n: NimNode, usedShims: var seq[string]): NimNode =
       result.add rewriteAst(n[0], usedShims)
       return
 
+  # --- %*{...} → JSON.stringify({...}) ---
+  if n.kind == nnkPrefix and n[0].kind == nnkIdent and n[0].strVal == "%*" and
+     n.len == 2 and n[1].kind == nnkTableConstr:
+    let tbl = n[1]
+    let nKeys = tbl.len
+    let shimName = "jsonStringify" & $nKeys
+    if shimName notin usedShims:
+      usedShims.add shimName
+    result = newCall(ident("jsJsonStringify" & $nKeys))
+    for i in 0..<nKeys:
+      let pair = tbl[i]
+      # key is always a string literal
+      result.add newLit(pair[0].strVal)
+      # value gets recursively rewritten
+      result.add rewriteAst(pair[1], usedShims)
+    return
+
   # --- $ prefix → String() ---
   if n.kind == nnkPrefix and n[0].kind == nnkIdent and n[0].strVal == "$":
     if "toString" notin usedShims:
@@ -146,9 +164,24 @@ proc generateShimProcs(usedShims: seq[string]): NimNode =
     of "concat":
       result.add parseStmt("proc jsConcat(a, b: cstring): cstring {.importjs: \"(# + #)\".}")
     else:
-      let idx = findShim(name)
-      if idx >= 0:
-        result.add parseStmt(shimDecl(shimDefs[idx]))
+      # jsonStringifyN shims: JSON.stringify({[#]: #, [#]: #, ...})
+      if name.len > 13 and name[0..12] == "jsonStringify":
+        let nKeys = parseInt(name[13..^1])
+        var params = ""
+        var jsBody = "JSON.stringify({"
+        for i in 0..<nKeys:
+          if i > 0:
+            params &= ", "
+            jsBody &= ", "
+          params &= "k" & $i & ": cstring, v" & $i & ": auto"
+          jsBody &= "[#]: #"
+        jsBody &= "})"
+        let decl = "proc jsJsonStringify" & $nKeys & "(" & params & "): cstring {.importjs: \"" & jsBody & "\".}"
+        result.add parseStmt(decl)
+      else:
+        let idx = findShim(name)
+        if idx >= 0:
+          result.add parseStmt(shimDecl(shimDefs[idx]))
 
 
 # ============================================================
