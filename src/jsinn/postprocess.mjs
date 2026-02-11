@@ -85,12 +85,64 @@ export function demangleNames(source) {
   return result;
 }
 
+/**
+ * Eliminate the BeforeRet labeled block pattern.
+ *
+ * Nim's JS backend uses this pattern for functions with multiple return points:
+ *   var result = null;
+ *   BeforeRet: {
+ *     result = EXPR;
+ *     break BeforeRet;
+ *   };
+ *   return result;
+ *
+ * This rewrites to direct return statements.
+ * Also handles simple result-assignment functions (no BeforeRet).
+ */
+export function eliminateBeforeRet(source) {
+  let s = source;
+
+  // Step 1: Replace "result = EXPR;\n...break BeforeRet;" with "return EXPR;"
+  s = s.replace(/^(\s*)result\s*=\s*(.+?);\s*\n\s*break BeforeRet;/gm,
+    (_, indent, expr) => `${indent}return ${expr};`);
+
+  // Step 2: Remove "BeforeRet: {" lines
+  s = s.replace(/^(\s*)BeforeRet:\s*\{/gm, "");
+
+  // Step 3: Remove closing "};" for BeforeRet (at same indent as function body)
+  // This is the bare "};" that was the end of the BeforeRet block
+  s = s.replace(/^\s*\};\s*$/gm, (match) => {
+    // Only remove if it looks like a BeforeRet closer (standalone };)
+    return "";
+  });
+
+  // Step 4: Remove "var result = null;" declarations
+  s = s.replace(/^\s*var result\s*=\s*null;\s*$/gm, "");
+
+  // Step 5: Remove orphaned "return result;" (the one after BeforeRet block)
+  s = s.replace(/^\s*return result;\s*$/gm, "");
+
+  // Step 6: Handle simple result pattern (no BeforeRet, just result = EXPR; ... return result;)
+  // After steps above, any remaining "result = EXPR;" followed later by a function end
+  // indicates a simple single-assignment function.
+  s = s.replace(/^(\s*)result\s*=\s*(.+?);$/gm, (_, indent, expr) => `${indent}return ${expr};`);
+
+  // Step 7: Collapse multiple blank lines to at most one
+  s = s.replace(/\n{3,}/g, "\n\n");
+
+  // Step 8: Remove trailing blank lines inside functions (before closing })
+  s = s.replace(/\n\n(\s*\})/g, "\n$1");
+
+  return s;
+}
+
 // CLI: node postprocess.mjs <input> [output]
 const args = process.argv.slice(2);
 if (args.length >= 1) {
   let output = readFileSync(args[0], "utf-8");
   output = stripHeader(output);
   output = demangleNames(output);
+  output = eliminateBeforeRet(output);
   if (args[1]) {
     writeFileSync(args[1], output);
   } else {
